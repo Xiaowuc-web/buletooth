@@ -32,4 +32,61 @@ void MPU6050_I2C_Init(void)
     i2c.I2C_Ack = I2C_Ack_Enable;
     i2c.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
     I2C_Init(I2C1, &i2c);
+    
+}
+
+static void MPU6050_I2C_Start(void)
+{
+    /* 让 I2C1 在总线上产生 START（起始条件）。 */
+    I2C_GenerateSTART(I2C1, ENABLE);
+
+    /* 等待 EV5：起始条件已产生，I2C1 已进入主机模式。 */
+    while(1)
+    {
+        if(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) == SUCCESS)
+        {
+            break;
+        }
+         
+    }
+    /* 7 位从机地址左移一位，最低位由发送方向设为 0，表示写。 */
+ I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Transmitter);
+
+    /* 等待 EV6：MPU6050 已应答地址，I2C1 可以发送数据。 */
+    while(1)
+    {
+        if(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) == SUCCESS)
+        {
+            break;
+        }
+    }
+  
+    /* 发送 WHO_AM_I 的寄存器地址，这一步还没有读取寄存器内容。 */
+    I2C_SendData(I2C1, MPU6050_WHO_AM_I_REG);
+
+    /* 检查 EV8_2：寄存器地址字节是否已发送完毕。 */
+     while(1)
+    {
+        if(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) == SUCCESS)
+        {
+            break;
+        }
+        /* 即使 EV8_2 尚未出现，这里也会退出，所以只检查一次。 */
+        {
+            break;
+        }
+    }
+    I2C_GenerateSTART(I2C1, ENABLE);
+    while(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+{
+    break;
+}
+}
+ I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
+
+MPU6050_ReadReg(uint8_t reg, uint8_t *value)
+{
+
+
+
 }
