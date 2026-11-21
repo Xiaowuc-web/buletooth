@@ -1,9 +1,10 @@
 #include "gpio.h"
 #include "blue.h"
 #include "OLED.h"
+#include "mpu6050.h"
 
 /**
- * @brief  初始化外设，循环接收串口字符串、更新 OLED 并回显。
+ * @brief  初始化外设（含 MPU6050 的 I2C1 总线），循环接收串口字符串、更新 OLED 并回显。
  * @param  无。
  * @retval 不返回。
  * @note   接收、显示和回显共用 buffer，不重复读取串口数据。
@@ -20,6 +21,7 @@ int main(void)
     GPIO_PC13_Init();
     LED_Init();
     USART1_Init();
+    MPU6050_I2C_Init();
     oledReady = OLED_Init();
 
     if (oledReady)
