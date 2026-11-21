@@ -72,15 +72,17 @@ static void MPU6050_I2C_Start(void)
             break;
         }
         /* 即使 EV8_2 尚未出现，这里也会退出，所以只检查一次。 */
+    
+    }
+    I2C_GenerateSTART(I2C1, ENABLE);
+    while(1)
+    {
+        if(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) == SUCCESS)
         {
             break;
         }
+    
     }
-    I2C_GenerateSTART(I2C1, ENABLE);
-    while(I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
-{
-    break;
-}
 }
  I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
 
