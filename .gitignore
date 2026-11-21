@@ -1,0 +1,6 @@
+# Keil build output and listings
+/Objects/
+/Listings/
+
+# Per-user Keil workspace settings
+*.uvguix.*
