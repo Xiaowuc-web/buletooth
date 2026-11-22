@@ -3,6 +3,11 @@
 #include "stm32f10x_i2c.h"
 #include "stm32f10x_rcc.h"
 
+/* 每个阶段最多轮询的次数，不是毫秒数。 */
+#define MPU6050_I2C_POLL_LIMIT 100000U
+#define MPU6050_I2C_ERROR_FLAGS \
+    (I2C_FLAG_AF | I2C_FLAG_BERR | I2C_FLAG_ARLO | I2C_FLAG_OVR | I2C_FLAG_TIMEOUT)
+
 /**
  * @brief 初始化 MPU6050 使用的 STM32 硬件 I2C1，总线速率为 100 kHz。
  * @details 开启 APB2 的 GPIOB 时钟和 APB1 的 I2C1 时钟，并复位 I2C1。
@@ -85,4 +90,102 @@ void MPU6050_ReadReg(uint8_t reg, uint8_t *value)
     {
     }
     I2C_AcknowledgeConfig(I2C1, ENABLE);
+}
+
+uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
+{
+    uint32_t remaining = MPU6050_I2C_POLL_LIMIT;
+    /* SPL 标志的低 16 位对应 SR1，去掉标志编码中的寄存器选择位。 */
+    const uint16_t errorMask = (uint16_t)MPU6050_I2C_ERROR_FLAGS;
+
+    /* 开始前等总线空闲，且前一次 START/STOP 请求已清除。 */
+    while (remaining != 0U &&
+           (I2C_GetFlagStatus(I2C1, I2C_FLAG_BUSY) == SET ||
+            (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) != 0U))
+    {
+        --remaining;
+    }
+    if (remaining == 0U)
+    {
+        return 0U;
+    }
+    I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+
+    I2C_GenerateSTART(I2C1, ENABLE);
+    remaining = MPU6050_I2C_POLL_LIMIT;
+    while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+           I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+    {
+        --remaining;
+    }
+    if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
+    {
+        goto writeFailed;
+    }
+
+    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Transmitter);
+    remaining = MPU6050_I2C_POLL_LIMIT;
+    while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+           I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
+    {
+        --remaining;
+    }
+    if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
+    {
+        goto writeFailed;
+    }
+
+    /* 等待 BTF（EV8_2），不只看 TXE，确保该字节已传完。 */
+    I2C_SendData(I2C1, reg);
+    remaining = MPU6050_I2C_POLL_LIMIT;
+    while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+           I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+    {
+        --remaining;
+    }
+    if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
+    {
+        goto writeFailed;
+    }
+
+    I2C_SendData(I2C1, data);
+    remaining = MPU6050_I2C_POLL_LIMIT;
+    while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+           I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+    {
+        --remaining;
+    }
+    if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
+    {
+        goto writeFailed;
+    }
+
+    I2C_GenerateSTOP(I2C1, ENABLE);
+    remaining = MPU6050_I2C_POLL_LIMIT;
+    while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+           (I2C1->CR1 & I2C_CR1_STOP) != 0U)
+    {
+        --remaining;
+    }
+    if (remaining != 0U && (I2C1->SR1 & errorMask) == 0U)
+    {
+        return 1U;
+    }
+
+writeFailed:
+    /* 仍为主机且无待处理的 START/STOP 时，尝试结束本次传输。 */
+    if (I2C_GetFlagStatus(I2C1, I2C_FLAG_MSL) == SET &&
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == RESET &&
+        (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) == 0U)
+    {
+        I2C_GenerateSTOP(I2C1, ENABLE);
+    }
+    I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+    return 0U;
+}
+
+uint8_t MPU6050_WakeUp(void)
+{
+    /* PWR_MGMT_1 写 0x00：清除 Bit 6（SLEEP）。 */
+    return MPU6050_WriteReg(MPU6050_PWR_MGMT_1_REG, 0x00U);
 }
