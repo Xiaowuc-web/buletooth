@@ -82,9 +82,19 @@ static void MPU6050_I2C_Start(void)
             break;
         }
     
-    }
+    } 
+    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
+   while(1)
+    {
+        if(I2C_CheckEvent(I2C1,  I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) == SUCCESS)
+        {
+            break;
+        }
+    
+    } 
 }
- I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
+
+
 
 MPU6050_ReadReg(uint8_t reg, uint8_t *value)
 {
