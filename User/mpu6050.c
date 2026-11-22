@@ -3,10 +3,10 @@
 #include "stm32f10x_i2c.h"
 #include "stm32f10x_rcc.h"
 
-/* 每个阶段最多轮询的次数，不是毫秒数。 */
-#define MPU6050_I2C_POLL_LIMIT 100000U
+/* 写入各阶段共用轮询次数，等待 STOP 时重新计数；单位不是毫秒。 */
+#define MPU6050_I2C_POLL_LIMIT 100000
 #define MPU6050_I2C_ERROR_FLAGS \
-    (I2C_FLAG_AF | I2C_FLAG_BERR | I2C_FLAG_ARLO | I2C_FLAG_OVR | I2C_FLAG_TIMEOUT)
+    (I2C_FLAG_AF | I2C_FLAG_BERR | I2C_FLAG_ARLO)
 
 /**
  * @brief 初始化 MPU6050 使用的 STM32 硬件 I2C1，总线速率为 100 kHz。
@@ -94,99 +94,94 @@ void MPU6050_ReadReg(uint8_t reg, uint8_t *value)
 
 uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
 {
-    uint32_t remaining = MPU6050_I2C_POLL_LIMIT;
-    const uint16_t errorMask = (uint16_t)MPU6050_I2C_ERROR_FLAGS;
+    uint32_t timeout = MPU6050_I2C_POLL_LIMIT;
 
-    /* 首次 START 前等待总线空闲，且前一次 START/STOP 请求已清除。 */
-    while (remaining != 0U &&
-           (I2C_GetFlagStatus(I2C1, I2C_FLAG_BUSY) == SET ||
-            (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) != 0U))
+    /* 等待总线空闲，并确认没有尚未完成的 START 或 STOP。 */
+    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_BUSY) == SET ||
+           (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) != 0)
     {
-        --remaining;
-    }
-    if (remaining == 0U)
-    {
-        return 0U;
+        --timeout;
+        if (timeout == 0)
+        {
+            return 0;
+        }
     }
     I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
 
-    /* 只执行一次；任一阶段失败就退出，统一处理总线。 */
-    do
+    /* 产生 START，等待 EV5。读函数的 START 辅助函数没有超时。 */
+    I2C_GenerateSTART(I2C1, ENABLE);
+    while (timeout != 0 &&
+           I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
     {
-        /* 与读函数的起始时序相同，但不调用无超时的辅助函数。 */
-        I2C_GenerateSTART(I2C1, ENABLE);
-        remaining = MPU6050_I2C_POLL_LIMIT;
-        while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
-               I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
-        {
-            --remaining;
-        }
-        if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
-        {
-            break;
-        }
+        --timeout;
+    }
 
-        /* 用写方向发送设备地址，等待 EV6 确认从机应答。 */
+    /* START 成功后，以写方向发送设备地址，等待 EV6。 */
+    if (timeout != 0)
+    {
         I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Transmitter);
-        remaining = MPU6050_I2C_POLL_LIMIT;
-        while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
+        while (timeout != 0 && I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == RESET &&
                I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
         {
-            --remaining;
+            --timeout;
         }
-        if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
-        {
-            break;
-        }
-
-        /* 发送寄存器地址，等 EV8_2 后再发数据。 */
-        I2C_SendData(I2C1, reg);
-        remaining = MPU6050_I2C_POLL_LIMIT;
-        while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
-               I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
-        {
-            --remaining;
-        }
-        if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
-        {
-            break;
-        }
-
-        /* 发送数据，等 EV8_2 后才产生 STOP。 */
-        I2C_SendData(I2C1, data);
-        remaining = MPU6050_I2C_POLL_LIMIT;
-        while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
-               I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
-        {
-            --remaining;
-        }
-        if (remaining == 0U || (I2C1->SR1 & errorMask) != 0U)
-        {
-            break;
-        }
-
-        I2C_GenerateSTOP(I2C1, ENABLE);
-        remaining = MPU6050_I2C_POLL_LIMIT;
-        while (remaining != 0U && (I2C1->SR1 & errorMask) == 0U &&
-               (I2C1->CR1 & I2C_CR1_STOP) != 0U)
-        {
-            --remaining;
-        }
-        if (remaining != 0U && (I2C1->SR1 & errorMask) == 0U)
-        {
-            return 1U;
-        }
-    } while (0);
-
-    /* 仍为主机且无待处理的 START/STOP 时，尝试结束本次传输。 */
-    if (I2C_GetFlagStatus(I2C1, I2C_FLAG_MSL) == SET &&
-        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == RESET &&
-        (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) == 0U)
-    {
-        I2C_GenerateSTOP(I2C1, ENABLE);
     }
-    I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
-    return 0U;
+
+    /* 前一步未超时、未收到 NACK，才发送寄存器地址。 */
+    if (timeout != 0 && I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == RESET)
+    {
+        I2C_SendData(I2C1, reg);
+        while (timeout != 0 && I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == RESET &&
+               I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+        {
+            --timeout;
+        }
+    }
+
+    /* 发送数据，再等一次 EV8_2，确保最后一个字节发送完毕。 */
+    if (timeout != 0 && I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == RESET)
+    {
+        I2C_SendData(I2C1, data);
+        while (timeout != 0 && I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == RESET &&
+               I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+        {
+            --timeout;
+        }
+    }
+
+    /* 成功或失败都尝试收尾，但只有仍为主机时才能发 STOP。 */
+    if (I2C_GetFlagStatus(I2C1, I2C_FLAG_MSL) == RESET ||
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == SET ||
+        (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) != 0)
+    {
+        I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+        return 0;
+    }
+    I2C_GenerateSTOP(I2C1, ENABLE);
+
+    if (timeout == 0 || I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == SET)
+    {
+        I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+        return 0;
+    }
+
+    /* 只有传输正常并且 STOP 已完成，才返回成功。 */
+    timeout = MPU6050_I2C_POLL_LIMIT;
+    while ((I2C1->CR1 & I2C_CR1_STOP) != 0)
+    {
+        --timeout;
+        if (timeout == 0)
+        {
+            return 0;
+        }
+    }
+    if (I2C_GetFlagStatus(I2C1, I2C_FLAG_BERR) == SET ||
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == SET)
+    {
+        I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+        return 0;
+    }
+    return 1;
 }
 
 uint8_t MPU6050_WakeUp(void)
