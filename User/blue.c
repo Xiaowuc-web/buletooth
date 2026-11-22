@@ -1,12 +1,6 @@
 #include "blue.h"
 #include "stm32f10x.h"
-
-#define USART1_RX_SIZE 512
-
-/* 中断写入，主循环取出。给 OLED 写屏期间到达的字节留空间。 */
-static volatile uint8_t rxBuffer[USART1_RX_SIZE];
-static volatile uint16_t rxHead = 0;
-static volatile uint16_t rxTail = 0;
+#include "bsp_dma.h"
 
 /**
  * @brief  初始化连接至 PB12 的 LED 控制引脚。
@@ -41,7 +35,7 @@ void LED_Init(void)
  * @retval 无。
  * @note   应在系统时钟配置完成后、首次收发数据前调用。
  *         要求 USART1 未重映射，且系统时钟相关变量与实际时钟一致。
- *         使用接收中断缓存字节，发送仍用原来的轮询方式。
+ *         使用 DMA 循环接收，发送使用轮询方式。
  *         不应在正在收发数据时调用，以免中断当前传输。
  */
 void USART1_Init(void)
@@ -76,11 +70,8 @@ void USART1_Init(void)
         USART_Mode_Tx | USART_Mode_Rx;
 
     USART_Init(USART1, &USART_InitStructure);
+    DMA_RX_Init();
     USART_Cmd(USART1, ENABLE);
-
-    NVIC_SetPriority(USART1_IRQn, 1);
-    NVIC_EnableIRQ(USART1_IRQn);
-    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
 }
 
 /**
@@ -135,15 +126,12 @@ void USART1_SendString(const char *str)
 }
 
 /**
- * @brief  通过 USART1 以阻塞轮询方式接收一个字节。
- *         等待接收数据寄存器非空标志 RXNE 置位后，读取数据寄存器，
- *         并返回接收到的低 8 位数据；读取操作会清除 RXNE 标志。
+ * @brief  等待并读取 USART1 的一个 DMA 接收字节。
  * @param  无。
  * @retval 接收到的原始字节，取值范围为 0～255（0x00～0xFF）。
  *         返回值 0 也是有效数据，不表示接收失败。
- * @note   调用前必须完成 USART1_Init() 初始化并使能接收功能。
- *         本函数没有超时机制，无数据到达时将一直等待并占用处理器。
- *         从接收中断维护的缓冲区中取出一个字节。
+ * @note   调用前必须完成 USART1_Init() 初始化。
+ *         DMA 缓冲区为空时，会等待直到有字节到达。
  */
 uint8_t USART1_ReceiveByte(void)
 {
@@ -202,30 +190,5 @@ void USART1_ReceiveString(char *buffer, uint8_t maxLen)
 /* 缓冲区空时立即返回，不等蓝牙发送。 */
 uint8_t USART1_TryReceiveByte(uint8_t *data)
 {
-    if (data == 0 || rxHead == rxTail)
-    {
-        return 0;
-    }
-    *data = rxBuffer[rxTail];
-    rxTail = (rxTail + 1) % USART1_RX_SIZE;
-    return 1;
-}
-
-void USART1_IRQHandler(void)
-{
-    uint16_t status = USART1->SR;
-    uint16_t nextHead;
-    uint8_t data;
-
-    if ((status & (USART_SR_RXNE | USART_SR_ORE)) != 0)
-    {
-        /* 先读 SR，再读 DR，清接收和溢出标志。 */
-        data = USART_ReceiveData(USART1);
-        nextHead = (rxHead + 1) % USART1_RX_SIZE;
-        if ((status & USART_SR_RXNE) != 0 && nextHead != rxTail)
-        {
-            rxBuffer[rxHead] = data;
-            rxHead = nextHead;
-        }
-    }
+    return DMA_RX_ReadByte(data);
 }

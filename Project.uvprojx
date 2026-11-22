@@ -671,6 +671,16 @@
               <FilePath>.\User\blue.h</FilePath>
             </File>
             <File>
+              <FileName>bsp_dma.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\User\bsp_dma.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_dma.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\User\bsp_dma.h</FilePath>
+            </File>
+            <File>
               <FileName>mpu6050.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\User\mpu6050.c</FilePath>
