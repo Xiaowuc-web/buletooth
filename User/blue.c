@@ -1,6 +1,13 @@
 #include "blue.h"
 #include "stm32f10x.h"
 
+#define USART1_RX_SIZE 512
+
+/* 中断写入，主循环取出。给 OLED 写屏期间到达的字节留空间。 */
+static volatile uint8_t rxBuffer[USART1_RX_SIZE];
+static volatile uint16_t rxHead = 0;
+static volatile uint16_t rxTail = 0;
+
 /**
  * @brief  初始化连接至 PB12 的 LED 控制引脚。
  *         开启 GPIOB 时钟，将 PB12 配置为 50 MHz 通用推挽输出。
@@ -28,13 +35,13 @@ void LED_Init(void)
 /**
  * @brief  初始化 USART1，使用默认引脚 PA9 发送、PA10 接收。
  *         开启 GPIOA 和 USART1 时钟，将 PA9 配置为 50 MHz 复用推挽输出，
- *         将 PA10 配置为浮空输入；串口采用 115200 波特率、8 位数据位、
+ *         将 PA10 配置为浮空输入；串口采用 9600 波特率、8 位数据位、
  *         1 位停止位、无奇偶校验、无硬件流控，并使能发送和接收功能。
  * @param  无。
  * @retval 无。
  * @note   应在系统时钟配置完成后、首次收发数据前调用。
  *         要求 USART1 未重映射，且系统时钟相关变量与实际时钟一致。
- *         本函数不配置中断、DMA 或接收缓冲区，后续可使用轮询方式收发。
+ *         使用接收中断缓存字节，发送仍用原来的轮询方式。
  *         不应在正在收发数据时调用，以免中断当前传输。
  */
 void USART1_Init(void)
@@ -70,6 +77,10 @@ void USART1_Init(void)
 
     USART_Init(USART1, &USART_InitStructure);
     USART_Cmd(USART1, ENABLE);
+
+    NVIC_SetPriority(USART1_IRQn, 1);
+    NVIC_EnableIRQ(USART1_IRQn);
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
 }
 
 /**
@@ -132,17 +143,16 @@ void USART1_SendString(const char *str)
  *         返回值 0 也是有效数据，不表示接收失败。
  * @note   调用前必须完成 USART1_Init() 初始化并使能接收功能。
  *         本函数没有超时机制，无数据到达时将一直等待并占用处理器。
- *         本函数不解析字符串、不转换数字，也不检查校验、帧或溢出错误。
- *         接收数据应及时读取，否则连续到达的数据可能导致溢出和丢失。
- *         不应与中断、DMA 或其他执行上下文同时读取 USART1 数据寄存器。
+ *         从接收中断维护的缓冲区中取出一个字节。
  */
 uint8_t USART1_ReceiveByte(void)
 {
-    while (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == RESET)
+    uint8_t data;
+
+    while (!USART1_TryReceiveByte(&data))
     {
     }
-
-    return (uint8_t)USART_ReceiveData(USART1);
+    return data;
 }
 
 /**
@@ -160,7 +170,7 @@ uint8_t USART1_ReceiveByte(void)
  *         缓冲区满时不丢弃剩余数据，后续调用将继续读取尚未接收的数据。
  *         仅消费遇到的一个结束符；若发送端使用 '\r\n'，剩余的 '\n'
  *         可能使下一次调用返回空字符串。建议发送端仅使用一种结束符。
- *         不适用于包含零字节的二进制数据，不应与中断或 DMA 同时接收。
+ *         不适用于包含零字节的二进制数据。
  */
 void USART1_ReceiveString(char *buffer, uint8_t maxLen)
 {
@@ -187,4 +197,35 @@ void USART1_ReceiveString(char *buffer, uint8_t maxLen)
     }
 
     buffer[index] = '\0';
+}
+
+/* 缓冲区空时立即返回，不等蓝牙发送。 */
+uint8_t USART1_TryReceiveByte(uint8_t *data)
+{
+    if (data == 0 || rxHead == rxTail)
+    {
+        return 0;
+    }
+    *data = rxBuffer[rxTail];
+    rxTail = (rxTail + 1) % USART1_RX_SIZE;
+    return 1;
+}
+
+void USART1_IRQHandler(void)
+{
+    uint16_t status = USART1->SR;
+    uint16_t nextHead;
+    uint8_t data;
+
+    if ((status & (USART_SR_RXNE | USART_SR_ORE)) != 0)
+    {
+        /* 先读 SR，再读 DR，清接收和溢出标志。 */
+        data = USART_ReceiveData(USART1);
+        nextHead = (rxHead + 1) % USART1_RX_SIZE;
+        if ((status & USART_SR_RXNE) != 0 && nextHead != rxTail)
+        {
+            rxBuffer[rxHead] = data;
+            rxHead = nextHead;
+        }
+    }
 }

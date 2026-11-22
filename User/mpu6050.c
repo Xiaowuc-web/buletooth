@@ -3,7 +3,7 @@
 #include "stm32f10x_i2c.h"
 #include "stm32f10x_rcc.h"
 
-/* 写入各阶段共用轮询次数，等待 STOP 时重新计数；单位不是毫秒。 */
+/* I2C 等待的轮询次数上限，单位不是毫秒。 */
 #define MPU6050_I2C_POLL_LIMIT 100000
 #define MPU6050_I2C_ERROR_FLAGS \
     (I2C_FLAG_AF | I2C_FLAG_BERR | I2C_FLAG_ARLO)
@@ -39,57 +39,185 @@ void MPU6050_I2C_Init(void)
     I2C_Init(I2C1, &i2c);
 }
 
-static void MPU6050_I2C_Start(void)
+/* 等待指定的 I2C 标志，遇到通信错误或超时就返回失败。 */
+static uint8_t MPU6050_WaitFlag(uint32_t flag)
 {
-    /* 产生 START 或重复 START，等待 EV5。 */
-    I2C_GenerateSTART(I2C1, ENABLE);
-    while (I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)
+    uint32_t timeout = MPU6050_I2C_POLL_LIMIT;
+
+    while (timeout != 0)
     {
+        if (I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == SET ||
+            I2C_GetFlagStatus(I2C1, I2C_FLAG_BERR) == SET ||
+            I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == SET)
+        {
+            return 0;
+        }
+        if (I2C_GetFlagStatus(I2C1, flag) == SET)
+        {
+            return 1;
+        }
+        --timeout;
     }
+    return 0;
 }
 
-void MPU6050_ReadReg(uint8_t reg, uint8_t *value)
+static uint8_t MPU6050_I2C_Start(void)
 {
-    if (value == 0)
-    {
-        return;
-    }
+    /* 产生 START 或重复 START，等 EV5 的 SB 标志。 */
+    I2C_GenerateSTART(I2C1, ENABLE);
+    return MPU6050_WaitFlag(I2C_FLAG_SB);
+}
 
-    /* 首次 START 前等待总线空闲；重复 START 前不等待 BUSY 清零。 */
-    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_BUSY) == SET)
-    {
-    }
-    MPU6050_I2C_Start();
+/* 失败时尝试发 STOP；STOP 完成后才恢复 ACK。 */
+static uint8_t MPU6050_EndRead(uint8_t success)
+{
+    uint32_t timeout = MPU6050_I2C_POLL_LIMIT;
 
-    /* 先用写方向发送从机地址，再发送调用者指定的寄存器地址。 */
-    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Transmitter);
-    while (I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
+    if (!success && I2C_GetFlagStatus(I2C1, I2C_FLAG_MSL) == SET &&
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == RESET &&
+        (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) == 0)
     {
+        I2C_GenerateSTOP(I2C1, ENABLE);
     }
-    I2C_SendData(I2C1, reg);
-    while (I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_BYTE_TRANSMITTED) != SUCCESS)
+    while ((I2C1->CR1 & I2C_CR1_STOP) != 0 && timeout != 0)
     {
+        --timeout;
     }
+    if ((I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) == 0)
+    {
+        I2C_AcknowledgeConfig(I2C1, ENABLE);
+    }
+    if (timeout == 0 || I2C_GetFlagStatus(I2C1, I2C_FLAG_AF) == SET ||
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_BERR) == SET ||
+        I2C_GetFlagStatus(I2C1, I2C_FLAG_ARLO) == SET)
+    {
+        success = 0;
+    }
+    I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
+    return success;
+}
 
-    /* 用重复 START 切换到读方向，不释放总线。 */
-    MPU6050_I2C_Start();
-    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
-    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_ADDR) == RESET)
-    {
-    }
-    I2C_AcknowledgeConfig(I2C1, DISABLE);
-    (void)I2C_GetLastEvent(I2C1); /* 依次读取 SR1、SR2，清除 ADDR。 */
-    I2C_GenerateSTOP(I2C1, ENABLE);
-    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_RXNE) == RESET)
-    {
-    }
-    *value = I2C_ReceiveData(I2C1);
+/* 共用读时序：调用者只读取 1 字节或一组 14 字节。 */
+static uint8_t MPU6050_ReadBytes(uint8_t reg, uint8_t *value, uint8_t count)
+{
+    uint32_t timeout = MPU6050_I2C_POLL_LIMIT;
+    uint32_t irqState;
+    uint8_t index = 0;
 
-    /* 等硬件清除 STOP 后，再写 CR1 恢复 ACK。 */
-    while ((I2C1->CR1 & I2C_CR1_STOP) != 0U)
+    /* 首次 START 前等待总线空闲。 */
+    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_BUSY) == SET ||
+           (I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) != 0)
     {
+        --timeout;
+        if (timeout == 0)
+        {
+            return 0;
+        }
     }
+    I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
     I2C_AcknowledgeConfig(I2C1, ENABLE);
+    if (!MPU6050_I2C_Start())
+    {
+        return MPU6050_EndRead(0);
+    }
+
+    /* 先写寄存器地址，再用重复 START 切换为读。 */
+    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Transmitter);
+    if (!MPU6050_WaitFlag(I2C_FLAG_ADDR))
+    {
+        return MPU6050_EndRead(0);
+    }
+    (void)I2C_GetLastEvent(I2C1); /* 读 SR1、SR2，清除 ADDR。 */
+    I2C_SendData(I2C1, reg);
+    if (!MPU6050_WaitFlag(I2C_FLAG_BTF) || !MPU6050_I2C_Start())
+    {
+        return MPU6050_EndRead(0);
+    }
+    I2C_Send7bitAddress(I2C1, MPU6050_ADDR << 1, I2C_Direction_Receiver);
+    if (!MPU6050_WaitFlag(I2C_FLAG_ADDR))
+    {
+        return MPU6050_EndRead(0);
+    }
+
+    if (count == 1)
+    {
+        /* 单字节：先关 ACK，再清 ADDR，紧接着请求 STOP。 */
+        irqState = __get_PRIMASK();
+        __disable_irq();
+        I2C_AcknowledgeConfig(I2C1, DISABLE);
+        (void)I2C_GetLastEvent(I2C1);
+        I2C_GenerateSTOP(I2C1, ENABLE);
+        __set_PRIMASK(irqState);
+    }
+    else
+    {
+        (void)I2C_GetLastEvent(I2C1);
+        while (count - index > 3)
+        {
+            if (!MPU6050_WaitFlag(I2C_FLAG_BTF))
+            {
+                return MPU6050_EndRead(0);
+            }
+            value[index] = I2C_ReceiveData(I2C1);
+            ++index;
+        }
+
+        /* 剩 3 字节时等 BTF，再关 ACK；最后一个字节由主机发 NACK。 */
+        if (!MPU6050_WaitFlag(I2C_FLAG_BTF))
+        {
+            return MPU6050_EndRead(0);
+        }
+        /* 读倒数第三字节到发 STOP 必须连着执行，不让串口中断打断。 */
+        irqState = __get_PRIMASK();
+        __disable_irq();
+        I2C_AcknowledgeConfig(I2C1, DISABLE);
+        value[index] = I2C_ReceiveData(I2C1);
+        I2C_GenerateSTOP(I2C1, ENABLE);
+        value[index + 1] = I2C_ReceiveData(I2C1);
+        __set_PRIMASK(irqState);
+    }
+
+    if (!MPU6050_WaitFlag(I2C_FLAG_RXNE))
+    {
+        return MPU6050_EndRead(0);
+    }
+    value[count - 1] = I2C_ReceiveData(I2C1);
+    return MPU6050_EndRead(1);
+}
+
+uint8_t MPU6050_ReadReg(uint8_t reg, uint8_t *value)
+{
+    uint8_t data;
+
+    if (value == 0 || !MPU6050_ReadBytes(reg, &data, 1))
+    {
+        return 0;
+    }
+    *value = data;
+    return 1;
+}
+
+uint8_t MPU6050_ReadData(int16_t data[7])
+{
+    uint8_t bytes[14];
+    uint8_t i;
+    int32_t value;
+
+    if (data == 0 || !MPU6050_ReadBytes(MPU6050_ACCEL_XOUT_H_REG, bytes, 14))
+    {
+        return 0;
+    }
+    for (i = 0; i < 7; i++)
+    {
+        /* 高字节占高 8 位；最高位为 1 时按 16 位补码转成负数。 */
+        value = (bytes[i * 2] << 8) | bytes[i * 2 + 1];
+        if (value >= 32768)
+        {
+            value -= 65536;
+        }
+        data[i] = value;
+    }
+    return 1;
 }
 
 uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
@@ -108,7 +236,7 @@ uint8_t MPU6050_WriteReg(uint8_t reg, uint8_t data)
     }
     I2C_ClearFlag(I2C1, MPU6050_I2C_ERROR_FLAGS);
 
-    /* 产生 START，等待 EV5。读函数的 START 辅助函数没有超时。 */
+    /* 产生 START，等待 EV5。 */
     I2C_GenerateSTART(I2C1, ENABLE);
     while (timeout != 0 &&
            I2C_CheckEvent(I2C1, I2C_EVENT_MASTER_MODE_SELECT) != SUCCESS)

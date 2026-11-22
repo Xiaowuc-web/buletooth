@@ -7,7 +7,7 @@
 #define OLED_I2C_ADDRESS  0x3CU
 
 /* Status: 0=not started, 1=init acknowledged, 2=bus low,
- * 3=no address ACK, 4=initialization NACK. */
+ * 3=no address ACK, 4=initialization NACK, 5=text transfer failed. */
 extern volatile uint8_t OLED_Status;
 extern volatile uint8_t OLED_DetectedAddress;
 uint8_t OLED_Init(void);

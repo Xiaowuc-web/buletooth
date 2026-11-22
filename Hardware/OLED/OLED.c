@@ -8,11 +8,15 @@ volatile uint8_t OLED_Status = 0;
 volatile uint8_t OLED_DetectedAddress = 0;
 static uint8_t OLED_Address = OLED_I2C_ADDRESS;
 
-/* Conservative bit timing, independent of SysTick and interrupts. */
+/* 缩短软件 I2C 的位延时，减小逐行刷屏的时间。 */
 static void OLED_Delay(void)
 {
-    volatile uint32_t n = SystemCoreClock / 200000U + 1U;
-    while (n-- != 0U) { __NOP(); }
+    volatile uint32_t n = SystemCoreClock / 1500000 + 1;
+    while (n != 0)
+    {
+        __NOP();
+        --n;
+    }
 }
 
 static void OLED_SCL(uint8_t level)
@@ -73,20 +77,24 @@ static uint8_t OLED_Begin(uint8_t control)
     return 1;
 }
 
-static void OLED_Command(uint8_t command)
+static uint8_t OLED_Command(uint8_t command)
 {
-    if (OLED_Begin(0x00))
+    uint8_t ack;
+
+    if (!OLED_Begin(0x00))
     {
-        OLED_WriteByte(command);
-        OLED_Stop();
+        return 0;
     }
+    ack = OLED_WriteByte(command);
+    OLED_Stop();
+    return ack;
 }
 
-static void OLED_SetCursor(uint8_t x, uint8_t page)
+static uint8_t OLED_SetCursor(uint8_t x, uint8_t page)
 {
-    OLED_Command((uint8_t)(0xB0U | page));
-    OLED_Command((uint8_t)(0x10U | (x >> 4)));
-    OLED_Command((uint8_t)(x & 0x0FU));
+    return OLED_Command(0xB0 | page) &&
+           OLED_Command(0x10 | (x >> 4)) &&
+           OLED_Command(x & 0x0F);
 }
 
 /**
@@ -157,7 +165,7 @@ uint8_t OLED_Init(void)
     }
     OLED_Stop();
     OLED_Clear();
-    OLED_Command(0xAF);
+    if (!OLED_Command(0xAF)) { return 0; }
     OLED_Status = 1;
     return 1;
 }
@@ -221,16 +229,25 @@ static uint8_t OLED_WriteGlyph(uint8_t ch)
  * @param  str：以 '\0' 结尾的字符串，空指针不执行显示。
  * @retval 无。
  * @note   字符占 6×8 像素，不自动换行、不清除字符串后方旧内容。
- *         直接写屏，无需刷新函数；非 ASCII 字节逐字节显示为问号。
+ *         直接写屏；通信失败后将 OLED_Status 设为 5，并停止写屏。
  */
 void OLED_ShowString(uint8_t x, uint8_t page, const char *str)
 {
-    if (str == 0 || x > 122U || page > 7U) { return; }
-    OLED_SetCursor(x, page);
-    if (!OLED_Begin(0x40)) { return; }
-    while (*str != '\0' && x <= 122U)
+    if (OLED_Status != 1 || str == 0 || x > 122 || page > 7) { return; }
+    if (GPIO_ReadInputDataBit(GPIOB, OLED_SCL_PIN) == Bit_RESET ||
+        GPIO_ReadInputDataBit(GPIOB, OLED_SDA_PIN) == Bit_RESET ||
+        !OLED_SetCursor(x, page) || !OLED_Begin(0x40))
     {
-        if (!OLED_WriteGlyph((uint8_t)*str)) { break; }
+        OLED_Status = 5;
+        return;
+    }
+    while (*str != '\0' && x <= 122)
+    {
+        if (!OLED_WriteGlyph((uint8_t)*str))
+        {
+            OLED_Status = 5;
+            break;
+        }
         str++;
         x = (uint8_t)(x + 6U);
     }
