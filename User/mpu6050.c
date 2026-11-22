@@ -72,6 +72,17 @@ void MPU6050_ReadReg(uint8_t reg, uint8_t *value)
     while (I2C_GetFlagStatus(I2C1, I2C_FLAG_ADDR) == RESET)
     {
     }
+    I2C_AcknowledgeConfig(I2C1, DISABLE);
+    (void)I2C_GetLastEvent(I2C1); /* 依次读取 SR1、SR2，清除 ADDR。 */
+    I2C_GenerateSTOP(I2C1, ENABLE);
+    while (I2C_GetFlagStatus(I2C1, I2C_FLAG_RXNE) == RESET)
+    {
+    }
+    *value = I2C_ReceiveData(I2C1);
 
-   
+    /* 等硬件清除 STOP 后，再写 CR1 恢复 ACK。 */
+    while ((I2C1->CR1 & I2C_CR1_STOP) != 0U)
+    {
+    }
+    I2C_AcknowledgeConfig(I2C1, ENABLE);
 }
